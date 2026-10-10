@@ -168,6 +168,17 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
     <button class="b" id="btnCsv">Descargar inventario (CSV)</button>
     <button class="b" id="btnMov">Descargar movimientos (CSV)</button>
   </div>
+  <div class="card" id="cargaCard">
+    <h2 style="margin-top:0">Carga de inventario</h2>
+    <p class="note" id="cargaNote">Parte con la bodega vacía. Puede cargar de una vez todas las posiciones del plan de slotting, o importar un listado propio.</p>
+    <div id="cargaProg" hidden><div class="bar" style="margin:6px 0"><i id="cargaBar" style="width:0%"></i></div><p class="note" id="cargaTxt"></p></div>
+    <div class="btns">
+      <button class="b pri" id="btnCargaPlan">Cargar el plan completo</button>
+      <button class="b" id="btnImp">Importar CSV</button>
+      <button class="b" id="btnVaciar">Vaciar inventario</button>
+    </div>
+    <input type="file" accept=".csv,text/csv" id="impFile" hidden>
+  </div>
   <div class="scroll"><table>
     <thead><tr><th>Ubicación</th><th>SKU</th><th>Lote</th><th class="n">Un.</th><th>Recibido</th><th></th></tr></thead>
     <tbody id="invBody"></tbody>
@@ -218,7 +229,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
    para que la recepción se guarde en la planilla compartida.
    Si la deja vacía, los datos quedan solo en este teléfono.
    ============================================================ */
-const SYNC_URL = "https://script.google.com/macros/s/AKfycbzDeFZRKQnXq23OqAfzBoSDNdhkmoI-iHCWeHt8E9TCfMXV9DH2QDToqxHk7Q9QOJFMnQ/exec";
+const SYNC_URL = "";
 
 const DATA=JSON.parse(document.getElementById('appdata').textContent);
 const SKU=DATA.sku, POS=DATA.pos, PROV=DATA.prov;
@@ -229,6 +240,9 @@ const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt=n=>Number(n).toLocaleString('es-CL');
 const hoy=()=>new Date().toISOString().slice(0,10);
+const PROVDE={}; Object.keys(PROV).forEach(pv=>PROV[pv].forEach(c=>{if(!PROVDE[c])PROVDE[c]=pv;}));
+const provDe=c=>PROVDE[c]||'Producción propia';
+const dormir=ms=>new Promise(r=>setTimeout(r,ms));
 
 // ---------- state ----------
 let db=null, user=null, downloads=null, uid='local';
@@ -276,7 +290,7 @@ async function initCloud(){
     db.collection('inventario').onSnapshot(snap=>{
       const n={};
       snap.docs.forEach(d=>{const v=d.data();if(v)n[d.id]=v;});
-      INV=n; renderAll();
+      INV=n; renderPronto();
     },err=>{setEstado('sin sincronizar ('+err.code+')','off');});
   }catch(e){
     localMode=true; INV=lsGet('metalpar_inv',{});
@@ -308,6 +322,83 @@ async function quitar(ubi){
   if(localMode){renderAll();return;}
   try{ await db.collection('inventario').doc(ubi).delete(); await logMov(Object.assign({tipo:'salida',ubicacion:ubi},reg||{})); }
   catch(e){ renderAll(); }
+}
+let cargando=false;
+function progreso(hecho,total,txt){
+  const box=$('cargaProg'); box.hidden=false;
+  $('cargaBar').style.width=(total?Math.round(100*hecho/total):0)+'%';
+  $('cargaTxt').textContent=txt||(fmt(hecho)+' de '+fmt(total)+' posiciones');
+}
+async function escribirUna(ubi,reg,reintentos){
+  if(SYNC_URL){INV[ubi]=reg;await sync('recepcion',{ubicacion:ubi,reg:reg});return true;}
+  if(localMode){INV[ubi]=reg;return true;}
+  try{ await db.collection('inventario').doc(ubi).set(reg); INV[ubi]=reg; return true; }
+  catch(e){
+    if((e&&(e.code==='resource_exhausted'||e.code==='unavailable'))&&(reintentos||0)<4){
+      await dormir(800*((reintentos||0)+1));
+      return escribirUna(ubi,reg,(reintentos||0)+1);
+    }
+    return false;
+  }
+}
+async function cargaMasiva(items,etiqueta){
+  if(cargando) return;
+  cargando=true;
+  const btns=['btnCargaPlan','btnImp','btnVaciar'].map($); btns.forEach(b=>b.disabled=true);
+  let ok=0,fallos=0;
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    const bien=await escribirUna(it.ubi,it.reg);
+    bien?ok++:fallos++;
+    if(i%20===0){progreso(i+1,items.length);renderInv();await dormir(0);}
+    else if(!localMode) await dormir(12);
+  }
+  lsSet('metalpar_inv',INV);
+  progreso(items.length,items.length,etiqueta+': '+fmt(ok)+' posiciones cargadas'+(fallos?(' · '+fmt(fallos)+' con error'):''));
+  if(!localMode) await logMov({tipo:'carga-inicial',ubicacion:'—',sku:etiqueta,cant:ok,lote:'',prov:''});
+  cargando=false; btns.forEach(b=>b.disabled=false); renderAll();
+}
+async function cargarPlan(){
+  const ts=new Date().toISOString();
+  const items=POS.filter(p=>p[6]&&!INV[p[0]]).map(p=>({ubi:p[0],reg:{
+    sku:p[6],nombre:(SKU[p[6]]&&SKU[p[6]][0])||'',cant:0,lote:'',fv:'',prov:provDe(p[6]),
+    ts:ts,u:uid,uso:(p[7]==='P'?'Picking':'Reserva'),origen:'plan'}}));
+  if(!items.length){progreso(1,1,'El plan ya está cargado por completo.');return;}
+  await cargaMasiva(items,'Plan de slotting');
+}
+async function vaciar(){
+  const ubis=Object.keys(INV);
+  if(!ubis.length){progreso(1,1,'El inventario ya está vacío.');return;}
+  cargando=true;
+  const btns=['btnCargaPlan','btnImp','btnVaciar'].map($); btns.forEach(b=>b.disabled=true);
+  for(let i=0;i<ubis.length;i++){
+    if(SYNC_URL){await sync('salida',{ubicacion:ubis[i],reg:INV[ubis[i]]||{}});}
+    else if(!localMode){try{await db.collection('inventario').doc(ubis[i]).delete();}catch(e){}await dormir(10);}
+    delete INV[ubis[i]];
+    if(i%20===0)progreso(i+1,ubis.length,'Vaciando…');
+  }
+  if(localMode) lsSet('metalpar_inv',INV);
+  progreso(1,1,'Inventario vaciado.');
+  cargando=false; btns.forEach(b=>b.disabled=false); renderAll();
+}
+function parseCSV(txt){
+  const lineas=txt.split(/\r?\n/).filter(l=>l.trim());
+  if(!lineas.length) return [];
+  const sep=(lineas[0].split(';').length>lineas[0].split(',').length)?';':',';
+  const cab=lineas[0].split(sep).map(c=>c.trim().toLowerCase().replace(/^"|"$/g,''));
+  const idx=n=>cab.indexOf(n);
+  const iU=idx('ubicacion'),iS=idx('sku'),iC=idx('unidades'),iL=idx('lote'),iV=idx('vencimiento'),iP=idx('proveedor');
+  if(iU<0||iS<0) return null;
+  const ts=new Date().toISOString(), out=[];
+  for(let i=1;i<lineas.length;i++){
+    const c=lineas[i].split(sep).map(x=>x.trim().replace(/^"|"$/g,''));
+    const ubi=(c[iU]||'').toUpperCase(), sku=(c[iS]||'').toUpperCase();
+    if(!POSBY[ubi]||!SKU[sku]) continue;
+    out.push({ubi:ubi,reg:{sku:sku,nombre:SKU[sku][0],cant:Number(iC>=0?c[iC]:0)||0,lote:(iL>=0?c[iL]:'')||'',
+      fv:(iV>=0?c[iV]:'')||'',prov:(iP>=0&&c[iP])?c[iP]:provDe(sku),ts:ts,u:uid,
+      uso:(POSBY[ubi][7]==='P'?'Picking':'Reserva'),origen:'csv'}});
+  }
+  return out;
 }
 async function logMov(ev){
   if(localMode){const k='metalpar_mov';const a=lsGet(k,[]);a.push(ev);lsSet(k,a);return;}
@@ -450,16 +541,26 @@ function focus3D(u){
 }
 function renderOcc(){
   if(!occGroup) return;
-  while(occGroup.children.length){const c=occGroup.children.pop();c.geometry.dispose();}
-  const m=new THREE.MeshLambertMaterial({color:0xe8871a});
-  Object.keys(INV).forEach(u=>{
-    const p=POSBY[u]; if(!p) return;
-    const f=u.split('-')[0];
-    const g=(f==='MZ')?new THREE.BoxGeometry(0.3,0.33,0.45):new THREE.BoxGeometry(1.15,(f==='BL'?1.5:1.0),0.95);
-    const b=new THREE.Mesh(g,m);
-    b.position.set(p[1]+0.6,p[3]+(f==='MZ'?0.2:0.56),p[2]+0.5);
-    occGroup.add(b);
-  });
+  while(occGroup.children.length){const c=occGroup.children.pop();if(c.geometry)c.geometry.dispose();}
+  const claves=Object.keys(INV).filter(u=>POSBY[u]);
+  if(!claves.length) return;
+  const pal=claves.filter(u=>u.split('-')[0]!=='MZ'), mz=claves.filter(u=>u.split('-')[0]==='MZ');
+  const mat=new THREE.MeshLambertMaterial({color:0xe8871a});
+  const dummy=new THREE.Object3D();
+  if(pal.length){
+    const im=new THREE.InstancedMesh(new THREE.BoxGeometry(1.15,1.0,0.95),mat,pal.length);
+    pal.forEach((u,i)=>{const p=POSBY[u];const bl=u.indexOf('BL-')===0;
+      dummy.position.set(p[1]+0.6,p[3]+(bl?0.8:0.56),p[2]+0.5);
+      dummy.scale.set(1,bl?1.5:1,1); dummy.updateMatrix(); im.setMatrixAt(i,dummy.matrix);});
+    im.instanceMatrix.needsUpdate=true; occGroup.add(im);
+  }
+  if(mz.length){
+    const im=new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,0.33,0.45),mat,mz.length);
+    mz.forEach((u,i)=>{const p=POSBY[u];
+      dummy.position.set(p[1]+0.17,p[3]+0.2,p[2]+0.07); dummy.scale.set(1,1,1);
+      dummy.updateMatrix(); im.setMatrixAt(i,dummy.matrix);});
+    im.instanceMatrix.needsUpdate=true; occGroup.add(im);
+  }
 }
 function sizeVP(){
   const vp=$('viewport'); if(!vp||!renderer) return;
@@ -603,6 +704,8 @@ function liveStop(){
 }
 
 // ---------- inventory ----------
+let rTimer=null;
+function renderPronto(){if(rTimer)return;rTimer=setTimeout(()=>{rTimer=null;renderAll();},400);}
 function renderAll(){renderOcc();renderInv();renderMapTiles();}
 function renderMapTiles(){
   const n=Object.keys(INV).length;
@@ -720,6 +823,26 @@ function start(){
     if(localMode){lsGet('metalpar_mov',[]).forEach(e=>rows.push([e.t||'',e.tipo,e.ubicacion,e.sku,e.cant,e.lote,e.prov]));}
     else{try{const s=await db.collection('movimientos').get();s.docs.forEach(d=>{(d.data().eventos||[]).forEach(e=>rows.push([e.t,e.tipo,e.ubicacion,e.sku,e.cant,e.lote,e.prov]));});}catch(e){}}
     bajar('movimientos-metalpar.csv',csv(rows));
+  };
+  function confirmar2(btn,texto,accion){
+    let armado=false,t=null;
+    btn.dataset.txt=btn.textContent;
+    btn.onclick=()=>{
+      if(!armado){armado=true;btn.textContent=texto;btn.classList.add('pri');
+        t=setTimeout(()=>{armado=false;btn.textContent=btn.dataset.txt;btn.classList.remove('pri');},6000);return;}
+      clearTimeout(t);armado=false;btn.textContent=btn.dataset.txt;btn.classList.remove('pri');accion();
+    };
+  }
+  confirmar2($('btnCargaPlan'),'Confirmar carga del plan',cargarPlan);
+  confirmar2($('btnVaciar'),'Confirmar: borrar todo',vaciar);
+  $('btnImp').onclick=()=>$('impFile').click();
+  $('impFile').onchange=async e=>{
+    const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+    const txt=await f.text();
+    const items=parseCSV(txt);
+    if(items===null){progreso(1,1,'El CSV debe tener al menos las columnas ubicacion y sku.');return;}
+    if(!items.length){progreso(1,1,'No se encontró ninguna fila válida (ubicación y SKU deben existir en la base).');return;}
+    await cargaMasiva(items,'Importación CSV');
   };
   $('q').addEventListener('input',renderInv);
   $('invBody').addEventListener('click',e=>{const u=e.target&&e.target.getAttribute&&e.target.getAttribute('data-del');if(u)quitar(u);});
