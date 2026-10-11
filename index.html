@@ -87,6 +87,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 <header>
   <h1>Recepción Metalpar</h1>
   <span class="dot" id="dot"></span><span id="estado">conectando…</span>
+  <button class="b" id="btnRecargar" hidden style="padding:4px 9px;font-size:12px;margin-left:6px">Recargar</button>
 </header>
 <nav>
   <button class="on" data-t="rec">Recepción</button>
@@ -225,11 +226,12 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 "use strict";
 /* ============================================================
    CONFIGURACIÓN · versión autónoma (para hospedar ustedes mismos)
-   Pegue aquí la URL de la aplicación web de Google Apps Script
+   Pegue entre las comillas la URL de la aplicación web de Apps Script
    (la que termina en /exec, sin el tramo /u/1/).
-   Si la deja vacía, los datos quedan solo en este teléfono.
+   Vacía = los datos quedan solo en este dispositivo.
    ============================================================ */
 const SYNC_URL = "https://script.google.com/macros/s/AKfycbw3l1yjuS34_JmbOl3Cd9hqdMNBBcDIrTaOGBgNx9ver5XOTPePE_QA6Fv7OGtnNvwrUg/exec";
+const DEMORA_SYNC = 60; // pausa entre escrituras masivas, en milisegundos
 
 const DATA=JSON.parse(document.getElementById('appdata').textContent);
 const SKU=DATA.sku, POS=DATA.pos, PROV=DATA.prov;
@@ -256,20 +258,40 @@ function setEstado(txt,cls){const d=$('dot');d.className='dot '+(cls||'');$('est
 function lsGet(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
+// Lectura por JSONP: Google no entrega cabeceras CORS, así que la respuesta
+// se pide como script. Es la única forma de leerla desde otro dominio.
+function leerRemoto(){
+  return new Promise(function(res){
+    var cb='_inv'+Math.random().toString(36).slice(2), sc=document.createElement('script'), listo=false;
+    function fin(v){ if(listo)return; listo=true; try{delete window[cb]}catch(e){window[cb]=undefined}
+      if(sc.parentNode)sc.parentNode.removeChild(sc); res(v); }
+    window[cb]=function(d){fin(d)};
+    sc.onerror=function(){fin(null)};
+    sc.src=SYNC_URL+(SYNC_URL.indexOf('?')>=0?'&':'?')+'callback='+cb+'&t='+Date.now();
+    document.head.appendChild(sc);
+    setTimeout(function(){fin(null)},20000);
+  });
+}
+// Escritura: la respuesta no se puede leer desde otro dominio, pero la
+// petición sí llega y el script la procesa. Por eso va en modo no-cors.
 async function sync(accion,payload){
   if(!SYNC_URL) return null;
   try{
-    const r=await fetch(SYNC_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(Object.assign({accion:accion},payload))});
-    return await r.json();
+    await fetch(SYNC_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body:JSON.stringify(Object.assign({accion:accion},payload))});
+    return {ok:true};
   }catch(e){ return null; }
 }
 async function initCloud(){
   try{
     if(SYNC_URL){
-      const r=await sync('inventario',{});
-      if(r&&r.inventario){INV=r.inventario;lsSet('metalpar_inv',INV);setEstado('planilla en la nube','on');}
-      else{INV=lsGet('metalpar_inv',{});setEstado('sin conexión con la planilla','off');}
-      localMode=false; renderAll();
+      localMode=false;
+      setEstado('leyendo la planilla…','off');
+      const r=await leerRemoto();
+      if(r&&r.inventario){ INV=r.inventario; lsSet('metalpar_inv',INV); setEstado('planilla en la nube','on'); }
+      else { INV=lsGet('metalpar_inv',{}); setEstado('sin conexión · datos locales','off'); }
+      renderAll();
+      $('btnRecargar').hidden=false;
       return;
     }
     if(!window.claude||!window.claude.use){throw new Error('sin runtime');}
@@ -296,7 +318,7 @@ async function initCloud(){
 async function guardar(ubi,reg){
   INV=Object.assign({},INV,{[ubi]:reg});
   lsSet('metalpar_inv',INV);
-  if(SYNC_URL){ renderAll(); const r=await sync('recepcion',{ubicacion:ubi,reg:reg}); if(!r) setEstado('sin conexión con la planilla','off'); return true; }
+  if(SYNC_URL){ renderAll(); await sync('recepcion',{ubicacion:ubi,reg:reg}); return true; }
   if(localMode){renderAll();return true;}
   try{
     await db.collection('inventario').doc(ubi).set(reg);
@@ -323,7 +345,7 @@ function progreso(hecho,total,txt){
   $('cargaTxt').textContent=txt||(fmt(hecho)+' de '+fmt(total)+' posiciones');
 }
 async function escribirUna(ubi,reg,reintentos){
-  if(SYNC_URL){INV[ubi]=reg;const r=await sync('recepcion',{ubicacion:ubi,reg:reg});return !!r;}
+  if(SYNC_URL){INV[ubi]=reg;await sync('recepcion',{ubicacion:ubi,reg:reg});return true;}
   if(localMode){INV[ubi]=reg;return true;}
   try{ await db.collection('inventario').doc(ubi).set(reg); INV[ubi]=reg; return true; }
   catch(e){
@@ -339,12 +361,25 @@ async function cargaMasiva(items,etiqueta){
   cargando=true;
   const btns=['btnCargaPlan','btnImp','btnVaciar'].map($); btns.forEach(b=>b.disabled=true);
   let ok=0,fallos=0;
-  for(let i=0;i<items.length;i++){
-    const it=items[i];
-    const bien=await escribirUna(it.ubi,it.reg);
-    bien?ok++:fallos++;
-    if(i%20===0){progreso(i+1,items.length);renderInv();await dormir(0);}
-    else if(!localMode) await dormir(12);
+  if(SYNC_URL){
+    // de a 50 por envío: 1.871 posiciones son unos 38 envíos en vez de 1.871
+    const TAM=50;
+    for(let i=0;i<items.length;i+=TAM){
+      const trozo=items.slice(i,i+TAM);
+      trozo.forEach(it=>{INV[it.ubi]=it.reg;});
+      const r=await sync('lote',{items:trozo.map(it=>({ubicacion:it.ubi,reg:it.reg}))});
+      r?ok+=trozo.length:fallos+=trozo.length;
+      progreso(Math.min(i+TAM,items.length),items.length);
+      renderInv(); await dormir(120);
+    }
+  } else {
+    for(let i=0;i<items.length;i++){
+      const it=items[i];
+      const bien=await escribirUna(it.ubi,it.reg);
+      bien?ok++:fallos++;
+      if(i%20===0){progreso(i+1,items.length);renderInv();await dormir(0);}
+      else if(!localMode) await dormir(12);
+    }
   }
   lsSet('metalpar_inv',INV);
   progreso(items.length,items.length,etiqueta+': '+fmt(ok)+' posiciones cargadas'+(fallos?(' · '+fmt(fallos)+' con error'):''));
@@ -378,7 +413,7 @@ async function vaciar(){
   cargando=true;
   const btns=['btnCargaPlan','btnImp','btnVaciar'].map($); btns.forEach(b=>b.disabled=true);
   for(let i=0;i<ubis.length;i++){
-    if(SYNC_URL){await sync('salida',{ubicacion:ubis[i],reg:INV[ubis[i]]||{}});}
+    if(SYNC_URL){await sync('salida',{ubicacion:ubis[i],reg:INV[ubis[i]]||{}});await dormir(25);}
     else if(!localMode){try{await db.collection('inventario').doc(ubis[i]).delete();}catch(e){}await dormir(10);}
     delete INV[ubis[i]];
     if(i%20===0)progreso(i+1,ubis.length,'Vaciando…');
@@ -841,6 +876,13 @@ function start(){
   }
   confirmar2($('btnCargaPlan'),'Confirmar carga del plan',cargarPlan);
   confirmar2($('btnVaciar'),'Confirmar: borrar todo',vaciar);
+  $('btnRecargar').onclick=async()=>{
+    setEstado('leyendo la planilla…','off');
+    const r=await leerRemoto();
+    if(r&&r.inventario){INV=r.inventario;lsSet('metalpar_inv',INV);setEstado('planilla en la nube','on');}
+    else setEstado('sin conexión · datos locales','off');
+    renderAll();
+  };
   $('btnImp').onclick=()=>$('impFile').click();
   $('impFile').onchange=async e=>{
     const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
