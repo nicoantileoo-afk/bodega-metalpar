@@ -27,6 +27,9 @@ header h1{font-family:var(--disp);font-size:20px;margin:0;letter-spacing:.01em;f
 #estado{font-size:12px;color:var(--muted);white-space:nowrap}
 nav{display:flex;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:calc(env(safe-area-inset-top,0px) + 49px);z-index:4}
 #barUsuario[hidden]{display:none!important}
+nav{overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+#quien{max-width:none}
 nav button{flex:1;font-family:var(--disp);font-size:15px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;padding:11px 2px;border:0;background:none;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;min-width:0}
 nav button.on{color:var(--fg);border-bottom-color:var(--accent)}
 main{flex:1;overflow:auto;padding:14px 16px 28px}
@@ -97,6 +100,8 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 td input[type=number]{padding:7px;width:90px;text-align:right}
 tr.falta td{background:var(--badbg)}
 .stage{font-family:var(--disp);text-transform:uppercase;letter-spacing:.04em;font-size:13px;color:var(--muted);margin:16px 0 6px}
+nav button{flex:1 0 auto;padding:11px 9px}
+@media (max-width:480px){nav button{font-size:13.5px;letter-spacing:.01em;padding:11px 7px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
@@ -111,13 +116,14 @@ tr.falta td{background:var(--badbg)}
 </header>
 <div id="barUsuario" hidden style="display:flex;align-items:center;gap:8px;padding:5px 16px;background:var(--panel);border-bottom:1px solid var(--line)">
   <span id="quien" style="flex:1"></span>
-  <button class="b" id="btnSalir" style="padding:3px 9px;font-size:12px">Cerrar sesión</button>
+  <button class="b" id="btnSalir" style="padding:3px 9px;font-size:12px;margin-left:auto">Cerrar sesión</button>
 </div>
 <nav>
   <button class="on" data-t="rec">Recepción</button>
   <button data-t="map">Mapa</button>
   <button data-t="inv">Inventario</button>
   <button data-t="lab">Etiquetas</button>
+  <button data-t="usr" id="navUsr" hidden>Usuarios</button>
 </nav>
 <main>
 
@@ -230,6 +236,16 @@ tr.falta td{background:var(--badbg)}
   <p class="note" id="invNote"></p>
 </section>
 
+<section class="tab" id="t-usr">
+  <div class="tiles" id="usrTiles"></div>
+  <div class="btns" style="margin:0 0 10px"><button class="b" id="btnUsrAct">Actualizar lista</button></div>
+  <div class="scroll"><table>
+    <thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Último ingreso</th></tr></thead>
+    <tbody id="usrBody"><tr><td colspan="4" class="note">Cargando…</td></tr></tbody>
+  </table></div>
+  <p class="note" style="margin-top:10px">Los usuarios se crean, cambian de rol o se desactivan en la pestaña Usuarios de la planilla de Google. Roles: administrador y asesor (todo), supervisor (recibe, retira, carga inventario y quita OC), operador (recibe y retira), recepcionista (solo recibe), despachador (solo retira) y consulta (solo mira).</p>
+</section>
+
 <section class="tab" id="t-lab">
   <h2>Etiqueta de bulto</h2>
   <div class="row">
@@ -323,7 +339,29 @@ async function sha256(t){
   const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));
   return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('');
 }
-const esSupervisor=()=>!SYNC_URL||(SES&&SES.rol==='supervisor');
+const PERMISOS_ROL={administrador:['recibir','retirar','cargar','quitarOC','usuarios'],asesor:['recibir','retirar','cargar','quitarOC','usuarios'],
+  supervisor:['recibir','retirar','cargar','quitarOC'],operador:['recibir','retirar'],recepcionista:['recibir'],despachador:['retirar'],consulta:[]};
+const NOMBRE_ROL={administrador:'administrador',asesor:'asesor',supervisor:'supervisor',operador:'operador',recepcionista:'recepcionista',despachador:'despachador',consulta:'solo consulta'};
+// sin planilla (versión de Claude o modo local) no hay roles: se permite todo
+function puede(p){
+  if(!SYNC_URL) return true;
+  if(!SES) return false;
+  const lista=Array.isArray(SES.permisos)?SES.permisos:(PERMISOS_ROL[SES.rol]||[]);
+  return lista.indexOf(p)>=0;
+}
+function aplicarPermisos(){
+  $('cargaCard').hidden=!puede('cargar');
+  ['btnOcImp','btnOcDemo','btnSinOc'].forEach(id=>{$(id).hidden=!puede('recibir');});
+  $('navUsr').hidden=!SYNC_URL||!puede('usuarios');
+  if($('navUsr').hidden&&$('t-usr').classList.contains('on')) tab('rec');
+  renderInv(); renderOcTodo();
+}
+function actualizarRol(r){
+  if(!SES||!r||!r.rol) return;
+  if(r.rol!==SES.rol||JSON.stringify(r.permisos||[])!==JSON.stringify(SES.permisos||[])){
+    SES.rol=r.rol; SES.permisos=r.permisos||[]; lsSet('metalpar_ses',SES); mostrarUsuario();
+  }
+}
 function pedirLogin(txt,cls){
   $('login').hidden=false; $('barUsuario').hidden=true;
   $('lgMsg').innerHTML=txt?'<div class="msg '+(cls||'warn')+'">'+esc(txt)+'</div>':'';
@@ -332,9 +370,8 @@ function pedirLogin(txt,cls){
 }
 function mostrarUsuario(){
   $('login').hidden=true; $('barUsuario').hidden=false;
-  $('quien').textContent=SES.nombre+' · '+(SES.rol==='supervisor'?'supervisor':'operador');
-  $('cargaCard').hidden=!esSupervisor();
-  renderOcTodo();
+  $('quien').textContent=SES.nombre+' · '+(NOMBRE_ROL[SES.rol]||SES.rol);
+  aplicarPermisos();
 }
 async function ingresar(e){
   if(e) e.preventDefault();
@@ -347,7 +384,7 @@ async function ingresar(e){
     const r=await jsonp({accion:'login',usuario:u,h:h});
     if(!r){pedirLogin('No hay conexión con la planilla. Revise la señal e intente de nuevo.','bad');return;}
     if(!r.ok){pedirLogin(r.error||'Usuario o contraseña incorrectos.','bad');return;}
-    SES={token:r.token,usuario:r.usuario,nombre:r.nombre,rol:r.rol};
+    SES={token:r.token,usuario:r.usuario,nombre:r.nombre,rol:r.rol,permisos:r.permisos||PERMISOS_ROL[r.rol]||[]};
     lsSet('metalpar_ses',SES); $('lgPass').value='';
     uid=SES.nombre; mostrarUsuario(); initCloud();
   }catch(err){ pedirLogin('Este navegador no permite ingresar de forma segura. Abra la app desde https.','bad'); }
@@ -360,7 +397,7 @@ function cerrarSesion(txt){
   INV={}; OCS={}; pend=null; renderAll(); vista('buscar');
   pedirLogin(txt||'Sesión cerrada.','ok');
 }
-function sesionVencida(r){ if(r&&r.ok===false&&r.error==='sesion'){cerrarSesion('Su sesión venció o fue cerrada. Ingrese de nuevo.');return true;} return false; }
+function sesionVencida(r){ if(r&&r.ok===false&&r.error==='sesion'){cerrarSesion('Su sesión venció o fue cerrada. Ingrese de nuevo.');return true;} actualizarRol(r); return false; }
 // cada 10 minutos, y al volver a la app, confirma que la sesión siga vigente
 setInterval(()=>{ if(SYNC_URL&&SES) jsonp({accion:'ping',token:SES.token}).then(sesionVencida); },600000);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&SYNC_URL&&SES) jsonp({accion:'ping',token:SES.token}).then(sesionVencida); });
@@ -797,6 +834,12 @@ function renderOC(){
     '<dl class="kv" style="margin-top:6px"><dt>Proveedor</dt><dd>'+esc(o.prov)+'</dd><dt>Entrega</dt><dd>'+esc(o.fecha||'sin fecha')+'</dd><dt>Pedido</dt><dd>'+fmt(tot('ped'))+' un. en '+o.lineas.length+' líneas</dd>'+
     (o.verifPor?'<dt>Verificó</dt><dd>'+esc(o.verifPor)+'</dd>':'')+(o.cierrePor?'<dt>Cerró</dt><dd>'+esc(o.cierrePor)+'</dd>':'')+'</dl>'+
     '<div class="btns"><button class="b" id="ocVolver">← Otras OC</button></div></div>';
+  const rw=puede('recibir');
+  if(!o.verif&&!rw){
+    h+='<p class="note">Esta OC todavía no se verifica.</p><div class="scroll"><table><thead><tr><th>Pos.</th><th>SKU</th><th class="n">Pedido</th></tr></thead><tbody>'+
+      o.lineas.map(l=>'<tr><td>'+esc(l.pos)+'</td><td>'+esc(l.sku)+'<br><span class="note">'+esc(l.desc||'')+'</span></td><td class="n">'+fmt(l.ped)+'</td></tr>').join('')+'</tbody></table></div>';
+    $('ocDet').innerHTML=h; return;
+  }
   if(!o.verif){
     h+='<div class="stage">Paso 1 de 3 · Verificar lo que llegó</div>'+
       '<p class="note">Cuente lo que viene en el camión y anote las unidades por línea. Lo que no se anote queda como no llegado.</p>'+
@@ -805,7 +848,7 @@ function renderOC(){
         '<td class="n"><input type="number" min="0" step="1" data-ll="'+i+'" value="'+(l.lleg==null?'':l.lleg)+'" inputmode="numeric"></td></tr>').join('')+
       '</tbody></table></div>'+
       '<div class="btns"><button class="b" id="ocTodo">Llegó todo completo</button><button class="b pri" id="ocVerif">Confirmar verificación</button></div>'+
-      ((tot('ubic')||!esSupervisor())?'':'<div class="btns"><button class="b" id="ocQuitar">Quitar esta OC</button></div>');
+      ((tot('ubic')||!puede('quitarOC'))?'':'<div class="btns"><button class="b" id="ocQuitar">Quitar esta OC</button></div>');
     $('ocDet').innerHTML=h; return;
   }
   const lin=o.lineas.map((l,i)=>{
@@ -815,7 +858,7 @@ function renderOC(){
     else if(pu>0) est='<span class="pill warn">Faltan '+fmt(pu)+' por ubicar</span>';
     else if(ll<l.ped) est='<span class="pill bad">Ubicada · faltaron '+fmt(l.ped-ll)+'</span>';
     else est='<span class="pill ok">Completa</span>';
-    const btn=(!cerrada(o)&&pu>0&&SKU[l.sku])?'<button class="b pri" data-ub="'+i+'" style="padding:6px 10px;font-size:13px;margin-top:4px">Ubicar pallet</button>':'';
+    const btn=(rw&&!cerrada(o)&&pu>0&&SKU[l.sku])?'<button class="b pri" data-ub="'+i+'" style="padding:6px 10px;font-size:13px;margin-top:4px">Ubicar pallet</button>':'';
     const ubis=(l.ubis&&l.ubis.length)?'<br><span class="note">'+l.ubis.map(esc).join(' · ')+'</span>':'';
     return '<tr'+(ll<l.ped?' class="falta"':'')+'><td>'+esc(l.pos)+'</td><td>'+esc(l.sku)+'<br><span class="note">'+esc(l.desc||'')+'</span>'+ubis+'</td><td class="n">'+fmt(l.ped)+'</td><td class="n">'+fmt(ll)+'</td><td class="n">'+fmt(l.ubic||0)+'</td><td>'+est+(SKU[l.sku]?'':'<br><span class="note">SKU fuera del maestro: no se puede ubicar</span>')+btn+'</td></tr>';
   }).join('');
@@ -824,13 +867,15 @@ function renderOC(){
     '<div class="tile"><b>'+fmt(pend)+'</b><small>un. por ubicar</small></div>'+
     '<div class="tile"><b>'+parc+'</b><small>líneas incompletas</small></div>'+
     '<div class="tile"><b>'+nol+'</b><small>líneas no llegaron</small></div></div>';
-  if(!cerrada(o)){
+  if(rw&&!cerrada(o)){
     h+='<div class="stage">Paso 2 de 3 · Ubicar lo que llegó</div>'+
       '<button class="b pri big" id="ocScan">Escanear bulto con la cámara</button>'+
       '<div class="btns"><button class="b" id="ocFoto">Escanear desde una foto</button><button class="b" id="ocReverif">Corregir verificación</button></div>';
   }
   h+='<div class="scroll" style="margin-top:12px"><table><thead><tr><th>Pos.</th><th>SKU</th><th class="n">Pedido</th><th class="n">Llegó</th><th class="n">Ubicado</th><th>Estado</th></tr></thead><tbody>'+lin+'</tbody></table></div>';
-  if(!cerrada(o)){
+  if(!cerrada(o)&&!rw){
+    h+='<p class="note" style="margin-top:10px">Recepción en curso.</p>';
+  }else if(!cerrada(o)){
     h+='<div class="stage">Paso 3 de 3 · Cerrar la recepción</div>'+
       '<p class="note">'+(pend?('Quedan '+fmt(pend)+' unidades sin ubicar. Puede cerrar igual, y quedarán informadas como pendientes.'):'Todo lo que llegó ya tiene ubicación.')+' El informe sirve para contabilizar la entrada en SAP (MIGO) y para reclamar al proveedor lo que faltó.</p>'+
       '<div class="btns"><button class="b'+(pend?'':' pri')+'" id="ocCerrar">Cerrar recepción</button></div>';
@@ -839,7 +884,7 @@ function renderOC(){
   }
   h+='<div class="btns"><button class="b" id="ocInforme">Descargar informe de recepción (CSV)</button></div>';
   $('ocDet').innerHTML=h;
-  if(!cerrada(o)) confirmar2($('ocCerrar'),pend?'Confirmar cierre con pendientes':'Confirmar cierre',cerrarOC);
+  if(rw&&!cerrada(o)) confirmar2($('ocCerrar'),pend?'Confirmar cierre con pendientes':'Confirmar cierre',cerrarOC);
 }
 function verificarOC(){
   const o=OCS[ocAct]; if(!o) return;
@@ -1004,6 +1049,20 @@ function tab(t){
   if(t==='map'){moveVP('vpSlot2');overview();renderOcc();setTimeout(sizeVP,30);}
   if(t==='rec'&&!$('paso3').hidden){moveVP('vpSlot');setTimeout(sizeVP,30);}
   if(t==='inv')renderInv();
+  if(t==='usr')cargarUsuarios();
+}
+async function cargarUsuarios(){
+  if(!SYNC_URL||!SES) return;
+  $('usrBody').innerHTML='<tr><td colspan="4" class="note">Cargando…</td></tr>';
+  const r=await jsonp({accion:'usuarios',token:SES.token});
+  if(sesionVencida(r)) return;
+  if(!r||!r.ok){$('usrBody').innerHTML='<tr><td colspan="4" class="note">'+(r&&r.error==='permiso'?'Su rol no permite ver los usuarios.':'No se pudo leer la lista. Revise la conexión.')+'</td></tr>';return;}
+  const us=r.usuarios||[];
+  $('usrBody').innerHTML=us.map(u=>'<tr><td><b>'+esc(u.nombre)+'</b><br><span class="note">'+esc(u.usuario)+'</span></td><td>'+esc(NOMBRE_ROL[u.rol]||u.rol)+'</td><td>'+
+    (!u.activo?'<span class="pill bad">Desactivado</span>':!u.conClave?'<span class="pill warn">Sin contraseña</span>':'<span class="pill ok">Activo</span>')+'</td><td>'+esc(u.ultimo||'nunca')+'</td></tr>').join('')||'<tr><td colspan="4" class="note">No hay usuarios.</td></tr>';
+  const porRol={}; us.filter(u=>u.activo).forEach(u=>porRol[u.rol]=(porRol[u.rol]||0)+1);
+  $('usrTiles').innerHTML='<div class="tile"><b>'+us.filter(u=>u.activo).length+'</b><small>usuarios activos</small></div>'+
+    Object.keys(porRol).sort().map(k=>'<div class="tile"><b>'+porRol[k]+'</b><small>'+esc(NOMBRE_ROL[k]||k)+'</small></div>').join('');
 }
 
 function skuCard(code){
@@ -1038,6 +1097,7 @@ function onCode(txt){
     else { tab('map'); $('goto').value=r.ubi; gotoUbi(r.ubi); }
     return;
   }
+  if(!puede('recibir')){ msg('rec','Su rol no permite registrar recepciones.','warn'); return; }
   if(VISTA==='oc'){ ocBulto(r); return; }
   if(VISTA==='pallet'&&pend&&pend.oc){ msg('rec','Termine o cancele el pallet que está ubicando antes de escanear otro bulto.','warn'); return; }
   if(VISTA==='buscar'){ msg('rec','Elija primero una orden de compra, o use "Recibir sin OC".','warn'); return; }
@@ -1159,7 +1219,7 @@ function renderInv(){
     .sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
   $('invBody').innerHTML=rows.slice(0,300).map(r=>
     '<tr><td><span class="code">'+esc(r.ubi)+'</span></td><td>'+esc(r.sku)+'<br><span class="note">'+esc(r.nombre||'')+'</span></td><td>'+esc(r.lote||'—')+'</td><td class="n">'+fmt(r.cant||0)+'</td><td>'+esc((r.ts||'').slice(0,10))+'<br><span class="note">'+esc(r.prov||'')+(r.u&&r.u!=='local'&&r.u.length<40?' · '+esc(r.u):'')+'</span></td>'+
-    '<td><button class="b" data-del="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Retirar</button></td></tr>').join('')||'<tr><td colspan="6" class="note">Sin stock registrado todavía.</td></tr>';
+    '<td>'+(puede('retirar')?'<button class="b" data-del="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Retirar</button>':'')+'</td></tr>').join('')||'<tr><td colspan="6" class="note">Sin stock registrado todavía.</td></tr>';
   const tot=Object.keys(INV).length, un=Object.keys(INV).reduce((s,u)=>s+(Number(INV[u].cant)||0),0);
   $('invTiles').innerHTML='<div class="tile"><b>'+fmt(tot)+'</b><small>pallets en bodega</small></div><div class="tile"><b>'+fmt(un)+'</b><small>unidades</small></div><div class="tile"><b>'+fmt(new Set(Object.keys(INV).map(u=>INV[u].sku)).size)+'</b><small>SKU distintos</small></div>';
   $('invNote').textContent=rows.length>300?('Mostrando 300 de '+rows.length+' registros. Afine la búsqueda o descargue el CSV.'):'';
@@ -1294,6 +1354,7 @@ function start(){
   };
   $('loginForm').addEventListener('submit',ingresar);
   $('btnSalir').onclick=()=>cerrarSesion();
+  $('btnUsrAct').onclick=cargarUsuarios;
   $('btnImp').onclick=()=>$('impFile').click();
   $('impFile').onchange=async e=>{
     const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
@@ -1318,6 +1379,7 @@ function start(){
   paso(1);
   OCS=lsGet('metalpar_oc',{});
   vista('buscar');
+  if(!SYNC_URL) aplicarPermisos();
   initCloud();
 }
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start();
