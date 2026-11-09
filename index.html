@@ -26,6 +26,7 @@ header h1{font-family:var(--disp);font-size:20px;margin:0;letter-spacing:.01em;f
 .dot.on{background:var(--ok)} .dot.off{background:var(--warn)}
 #estado{font-size:12px;color:var(--muted);white-space:nowrap}
 nav{display:flex;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:calc(env(safe-area-inset-top,0px) + 49px);z-index:4}
+#barUsuario[hidden]{display:none!important}
 nav button{flex:1;font-family:var(--disp);font-size:15px;font-weight:600;text-transform:uppercase;letter-spacing:.03em;padding:11px 2px;border:0;background:none;color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;min-width:0}
 nav button.on{color:var(--fg);border-bottom-color:var(--accent)}
 main{flex:1;overflow:auto;padding:14px 16px 28px}
@@ -77,6 +78,12 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
 .pill.b{background:var(--warnbg);color:var(--warn);border-color:transparent}
 .pill.c{background:var(--codebg);color:var(--code);border-color:transparent}
 @media (min-width:760px){ .two{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start} }
+#login{position:fixed;inset:0;z-index:50;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}
+#login[hidden]{display:none}
+#login .box{width:100%;max-width:360px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:22px}
+#login h1{font-family:var(--disp);font-size:26px;margin:0 0 2px}
+#login input[type=password]{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);font:inherit}
+#quien{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:38vw}
 .bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden}
 .bar i{display:block;height:100%;background:var(--accent)}
 .ocitem{display:block;width:100%;text-align:left;font:inherit;color:inherit;cursor:pointer;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:11px 12px;margin-bottom:8px}
@@ -102,6 +109,10 @@ tr.falta td{background:var(--badbg)}
   <span class="dot" id="dot"></span><span id="estado">conectando…</span>
   <button class="b" id="btnRecargar" hidden style="padding:4px 9px;font-size:12px;margin-left:6px">Recargar</button>
 </header>
+<div id="barUsuario" hidden style="display:flex;align-items:center;gap:8px;padding:5px 16px;background:var(--panel);border-bottom:1px solid var(--line)">
+  <span id="quien" style="flex:1"></span>
+  <button class="b" id="btnSalir" style="padding:3px 9px;font-size:12px">Cerrar sesión</button>
+</div>
 <nav>
   <button class="on" data-t="rec">Recepción</button>
   <button data-t="map">Mapa</button>
@@ -245,6 +256,18 @@ tr.falta td{background:var(--badbg)}
 </main>
 </div>
 
+<div id="login" hidden>
+  <form class="box" id="loginForm" autocomplete="on">
+    <h1>ESMAX LocationPro</h1>
+    <p class="note" style="margin-bottom:16px">Bodega Metalpar · ingrese con su usuario</p>
+    <div class="field"><label for="lgUser">Usuario</label><input type="text" id="lgUser" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>
+    <div class="field"><label for="lgPass">Contraseña</label><input type="password" id="lgPass" autocomplete="current-password" required></div>
+    <div id="lgMsg"></div>
+    <button class="b pri big" id="lgBtn" type="submit">Ingresar</button>
+    <p class="note" style="margin-top:12px">Si no tiene usuario o olvidó su contraseña, pídaselo al supervisor de bodega.</p>
+  </form>
+</div>
+
 <div id="vpHost" hidden>
   <div id="viewport"><canvas id="c3d"></canvas><div class="vpctl"><button class="b" id="vGen">Vista general</button><button class="b" id="vFoc">Al pallet</button></div><span class="vphint">Arrastre para girar · dos dedos para acercar</span></div>
 </div>
@@ -294,16 +317,72 @@ function setEstado(txt,cls){const d=$('dot');d.className='dot '+(cls||'');$('est
 function lsGet(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
 
+// ---------- sesión (solo en la versión con planilla) ----------
+let SES=null;   // {token, usuario, nombre, rol}
+async function sha256(t){
+  const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(t));
+  return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,'0')).join('');
+}
+const esSupervisor=()=>!SYNC_URL||(SES&&SES.rol==='supervisor');
+function pedirLogin(txt,cls){
+  $('login').hidden=false; $('barUsuario').hidden=true;
+  $('lgMsg').innerHTML=txt?'<div class="msg '+(cls||'warn')+'">'+esc(txt)+'</div>':'';
+  setEstado('sin sesión','off');
+  setTimeout(()=>{try{$(($('lgUser').value?'lgPass':'lgUser')).focus();}catch(e){}},50);
+}
+function mostrarUsuario(){
+  $('login').hidden=true; $('barUsuario').hidden=false;
+  $('quien').textContent=SES.nombre+' · '+(SES.rol==='supervisor'?'supervisor':'operador');
+  $('cargaCard').hidden=!esSupervisor();
+  renderOcTodo();
+}
+async function ingresar(e){
+  if(e) e.preventDefault();
+  const u=$('lgUser').value.trim().toLowerCase(), c=$('lgPass').value;
+  if(!u||!c) return;
+  $('lgBtn').disabled=true; $('lgMsg').innerHTML='<p class="note">Verificando…</p>';
+  try{
+    // la contraseña no viaja: se manda su huella SHA-256
+    const h=await sha256('esmax|'+u+'|'+c);
+    const r=await jsonp({accion:'login',usuario:u,h:h});
+    if(!r){pedirLogin('No hay conexión con la planilla. Revise la señal e intente de nuevo.','bad');return;}
+    if(!r.ok){pedirLogin(r.error||'Usuario o contraseña incorrectos.','bad');return;}
+    SES={token:r.token,usuario:r.usuario,nombre:r.nombre,rol:r.rol};
+    lsSet('metalpar_ses',SES); $('lgPass').value='';
+    uid=SES.nombre; mostrarUsuario(); initCloud();
+  }catch(err){ pedirLogin('Este navegador no permite ingresar de forma segura. Abra la app desde https.','bad'); }
+  finally{ $('lgBtn').disabled=false; }
+}
+function cerrarSesion(txt){
+  if(SES&&SES.token) jsonp({accion:'logout',token:SES.token});
+  SES=null; uid='local';
+  ['metalpar_ses','metalpar_inv','metalpar_oc'].forEach(k=>{try{localStorage.removeItem(k)}catch(e){}});
+  INV={}; OCS={}; pend=null; renderAll(); vista('buscar');
+  pedirLogin(txt||'Sesión cerrada.','ok');
+}
+function sesionVencida(r){ if(r&&r.ok===false&&r.error==='sesion'){cerrarSesion('Su sesión venció o fue cerrada. Ingrese de nuevo.');return true;} return false; }
+// cada 10 minutos, y al volver a la app, confirma que la sesión siga vigente
+setInterval(()=>{ if(SYNC_URL&&SES) jsonp({accion:'ping',token:SES.token}).then(sesionVencida); },600000);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&SYNC_URL&&SES) jsonp({accion:'ping',token:SES.token}).then(sesionVencida); });
+
 // Lectura por JSONP: Google no entrega cabeceras CORS, así que la respuesta
 // se pide como script. Es la única forma de leerla desde otro dominio.
-function leerRemoto(){
+function mezclarOCRemotas(r){
+  if(!r||!r.oc||typeof r.oc!=='object') return;
+  const locales=lsGet('metalpar_oc',{}), rem=r.oc;
+  Object.keys(locales).forEach(k=>{ if(!rem[k]){ rem[k]=locales[k]; sync('oc',{oc:locales[k]}); } });
+  OCS=rem; lsSet('metalpar_oc',OCS); renderOcTodo();
+}
+function leerRemoto(){ return jsonp({token:SES?SES.token:''}); }
+function jsonp(params){
   return new Promise(function(res){
     var cb='_inv'+Math.random().toString(36).slice(2), sc=document.createElement('script'), listo=false;
     function fin(v){ if(listo)return; listo=true; try{delete window[cb]}catch(e){window[cb]=undefined}
       if(sc.parentNode)sc.parentNode.removeChild(sc); res(v); }
     window[cb]=function(d){fin(d)};
     sc.onerror=function(){fin(null)};
-    sc.src=SYNC_URL+(SYNC_URL.indexOf('?')>=0?'&':'?')+'callback='+cb+'&t='+Date.now();
+    const q=Object.keys(params||{}).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
+    sc.src=SYNC_URL+(SYNC_URL.indexOf('?')>=0?'&':'?')+(q?q+'&':'')+'callback='+cb+'&t='+Date.now();
     document.head.appendChild(sc);
     setTimeout(function(){fin(null)},20000);
   });
@@ -314,7 +393,7 @@ async function sync(accion,payload){
   if(!SYNC_URL) return null;
   try{
     await fetch(SYNC_URL,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body:JSON.stringify(Object.assign({accion:accion},payload))});
+      body:JSON.stringify(Object.assign({accion:accion,token:SES?SES.token:''},payload))});
     return {ok:true};
   }catch(e){ return null; }
 }
@@ -322,9 +401,13 @@ async function initCloud(){
   try{
     if(SYNC_URL){
       localMode=false;
+      SES=SES||lsGet('metalpar_ses',null);
+      if(!SES||!SES.token){ pedirLogin(); return; }
+      uid=SES.nombre; mostrarUsuario();
       setEstado('leyendo la planilla…','off');
       const r=await leerRemoto();
-      if(r&&r.inventario){ INV=r.inventario; lsSet('metalpar_inv',INV); setEstado('planilla en la nube','on'); }
+      if(sesionVencida(r)) return;
+      if(r&&r.inventario){ INV=r.inventario; lsSet('metalpar_inv',INV); setEstado('planilla en la nube','on'); mezclarOCRemotas(r); }
       else { INV=lsGet('metalpar_inv',{}); setEstado('sin conexión · datos locales','off'); }
       renderAll();
       $('btnRecargar').hidden=false;
@@ -677,13 +760,17 @@ const ESTADO_OC={abierta:['Abierta',''],verificada:['En recepción','warn'],reci
 function pillOC(o){const e=ESTADO_OC[o.estado]||ESTADO_OC.abierta;return '<span class="pill '+e[1]+'">'+e[0]+'</span>';}
 const cerrada=o=>o.estado==='recibida'||o.estado==='faltantes';
 const porUbicar=l=>Math.max(0,(Number(l.lleg)||0)-(Number(l.ubic)||0));
-async function guardarOC(o){
+async function guardarOC(o,delta){
   OCS=Object.assign({},OCS,{[o.oc]:o});
   lsSet('metalpar_oc',OCS);
+  // en la planilla, un pallet ubicado se manda como suma (oc-ubicar) para que dos
+  // operadores trabajando la misma OC no se pisen el avance
+  if(SYNC_URL){ await sync(delta?'oc-ubicar':'oc',delta||{oc:o}); return; }
   if(db&&!localMode&&!SYNC_URL){try{await db.collection('oc').doc(o.oc).set(o);}catch(e){msg('rec','La OC quedó guardada en este dispositivo, pero no se pudo subir a la nube.','warn');}}
 }
 async function borrarOC(n){
   const c=Object.assign({},OCS); delete c[n]; OCS=c; lsSet('metalpar_oc',OCS);
+  if(SYNC_URL){ await sync('oc-borrar',{oc:n}); return; }
   if(db&&!localMode&&!SYNC_URL){try{await db.collection('oc').doc(n).delete();}catch(e){}}
 }
 function renderOcTodo(){ if(VISTA==='buscar')renderOcList(); else if(VISTA==='oc')renderOC(); }
@@ -700,14 +787,15 @@ function renderOcList(){
       '<div class="note" style="margin-top:3px">'+esc(o.prov)+' · entrega '+esc(o.fecha||'sin fecha')+' · '+o.lineas.length+' línea'+(o.lineas.length===1?'':'s')+' · '+fmt(ped)+' un.'+(ub?(' · '+fmt(ub)+' ubicadas'):'')+'</div></button>';
   }).join('')||'<p class="note">'+(todas.length?'Ninguna OC coincide con la búsqueda.':'Todavía no hay órdenes de compra cargadas. Importe la exportación de SAP (ME2N) o cargue las OC de ejemplo.')+'</p>';
   const ab=todas.filter(o=>!cerrada(o)).length;
-  $('ocNote').textContent=todas.length?(fmt(ab)+' OC pendientes de recibir · '+fmt(todas.length-ab)+' cerradas'+(SYNC_URL?' · las OC se guardan en este dispositivo':'')):'';
+  $('ocNote').textContent=todas.length?(fmt(ab)+' OC pendientes de recibir · '+fmt(todas.length-ab)+' cerradas'+(SYNC_URL?' · use Recargar para ver lo que registraron otros':'')):'';
 }
 function abrirOC(n){ if(!OCS[n])return; ocAct=n; msg('rec',''); vista('oc'); }
 function renderOC(){
   const o=OCS[ocAct]; if(!o){vista('buscar');return;}
   const tot=k=>o.lineas.reduce((s,l)=>s+(Number(l[k])||0),0);
   let h='<div class="card"><div class="t" style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="ocnum" style="font-size:20px">OC '+esc(o.oc)+'</span>'+pillOC(o)+'</div>'+
-    '<dl class="kv" style="margin-top:6px"><dt>Proveedor</dt><dd>'+esc(o.prov)+'</dd><dt>Entrega</dt><dd>'+esc(o.fecha||'sin fecha')+'</dd><dt>Pedido</dt><dd>'+fmt(tot('ped'))+' un. en '+o.lineas.length+' líneas</dd></dl>'+
+    '<dl class="kv" style="margin-top:6px"><dt>Proveedor</dt><dd>'+esc(o.prov)+'</dd><dt>Entrega</dt><dd>'+esc(o.fecha||'sin fecha')+'</dd><dt>Pedido</dt><dd>'+fmt(tot('ped'))+' un. en '+o.lineas.length+' líneas</dd>'+
+    (o.verifPor?'<dt>Verificó</dt><dd>'+esc(o.verifPor)+'</dd>':'')+(o.cierrePor?'<dt>Cerró</dt><dd>'+esc(o.cierrePor)+'</dd>':'')+'</dl>'+
     '<div class="btns"><button class="b" id="ocVolver">← Otras OC</button></div></div>';
   if(!o.verif){
     h+='<div class="stage">Paso 1 de 3 · Verificar lo que llegó</div>'+
@@ -717,7 +805,7 @@ function renderOC(){
         '<td class="n"><input type="number" min="0" step="1" data-ll="'+i+'" value="'+(l.lleg==null?'':l.lleg)+'" inputmode="numeric"></td></tr>').join('')+
       '</tbody></table></div>'+
       '<div class="btns"><button class="b" id="ocTodo">Llegó todo completo</button><button class="b pri" id="ocVerif">Confirmar verificación</button></div>'+
-      (tot('ubic')?'':'<div class="btns"><button class="b" id="ocQuitar">Quitar esta OC</button></div>');
+      ((tot('ubic')||!esSupervisor())?'':'<div class="btns"><button class="b" id="ocQuitar">Quitar esta OC</button></div>');
     $('ocDet').innerHTML=h; return;
   }
   const lin=o.lineas.map((l,i)=>{
@@ -764,7 +852,7 @@ function verificarOC(){
     n.lineas[i].lleg=v;
   });
   if(malo){msg('rec',malo,'bad');return;}
-  n.verif=true; n.estado='verificada'; n.tsVerif=new Date().toISOString();
+  n.verif=true; n.estado='verificada'; n.tsVerif=new Date().toISOString(); n.verifPor=uid;
   const lleg=n.lineas.reduce((s,l)=>s+l.lleg,0);
   if(!lleg){msg('rec','No anotó nada como llegado. Si el camión no trajo nada de esta OC, no la verifique y déjela abierta.','warn');return;}
   const nol=n.lineas.filter(l=>!l.lleg).length, parc=n.lineas.filter(l=>l.lleg&&l.lleg<l.ped).length;
@@ -795,7 +883,7 @@ async function cerrarOC(){
   const o=OCS[ocAct]; if(!o) return;
   const n=JSON.parse(JSON.stringify(o));
   const falta=n.lineas.some(l=>(Number(l.lleg)||0)<l.ped);
-  n.estado=falta?'faltantes':'recibida'; n.cierre=new Date().toISOString();
+  n.estado=falta?'faltantes':'recibida'; n.cierre=new Date().toISOString(); n.cierrePor=uid;
   await guardarOC(n);
   if(!localMode) await logMov({tipo:'cierre-oc',ubicacion:'—',sku:'OC '+n.oc,cant:n.lineas.reduce((s,l)=>s+(Number(l.lleg)||0),0),lote:'',prov:n.prov});
   msg('rec','Recepción de la OC '+n.oc+' cerrada'+(falta?' con faltantes.':' completa.'),falta?'warn':'ok');
@@ -803,8 +891,9 @@ async function cerrarOC(){
 }
 function informeOC(o){
   o=o||OCS[ocAct]; if(!o) return;
-  const rows=[['oc','proveedor','posicion','sku','descripcion','pedido','llego','faltante','ubicado','sin_ubicar','ubicaciones','estado']];
-  o.lineas.forEach(l=>{const ll=Number(l.lleg)||0;rows.push([o.oc,o.prov,l.pos,l.sku,l.desc||'',l.ped,ll,l.ped-ll,l.ubic||0,porUbicar(l),(l.ubis||[]).join(' '),ll===0?'no llegó':ll<l.ped?'incompleta':'completa']);});
+  const rows=[['oc','proveedor','posicion','sku','descripcion','pedido','llego','faltante','ubicado','sin_ubicar','ubicaciones','ubicado_por','estado','verificado_por','cerrado_por']];
+  const unicos=a=>Array.from(new Set(a||[])).join(' / ');
+  o.lineas.forEach(l=>{const ll=Number(l.lleg)||0;rows.push([o.oc,o.prov,l.pos,l.sku,l.desc||'',l.ped,ll,l.ped-ll,l.ubic||0,porUbicar(l),(l.ubis||[]).join(' '),unicos(l.por),ll===0?'no llegó':ll<l.ped?'incompleta':'completa',o.verifPor||'',o.cierrePor||'']);});
   bajar('recepcion-OC-'+o.oc+'.csv',csv(rows));
 }
 
@@ -997,8 +1086,8 @@ async function confirmar(ubiEscaneada){
   const u=pend.ubi;
   if(pend.oc&&OCS[pend.oc]){
     const o=JSON.parse(JSON.stringify(OCS[pend.oc])), l=o.lineas[pend.li];
-    l.ubic=(Number(l.ubic)||0)+pend.cant; (l.ubis=l.ubis||[]).push(u);
-    await guardarOC(o);
+    l.ubic=(Number(l.ubic)||0)+pend.cant; (l.ubis=l.ubis||[]).push(u); (l.por=l.por||[]).push(uid);
+    await guardarOC(o,{oc:o.oc,li:pend.li,cant:pend.cant,ubi:u});
     const quedan=porUbicar(l);
     pend=null; overview(); renderAll(); vista('oc');
     msg('rec','Pallet registrado en '+u+'. '+(quedan?('Quedan '+fmt(quedan)+' un. de '+l.sku+' por ubicar.'):('Línea '+l.pos+' ('+l.sku+') ubicada completa.')),'ok');
@@ -1069,7 +1158,7 @@ function renderInv(){
     .filter(r=>!q||(r.ubi+' '+(r.sku||'')+' '+(r.lote||'')+' '+(r.prov||'')+' '+(r.nombre||'')).toUpperCase().indexOf(q)>=0)
     .sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
   $('invBody').innerHTML=rows.slice(0,300).map(r=>
-    '<tr><td><span class="code">'+esc(r.ubi)+'</span></td><td>'+esc(r.sku)+'<br><span class="note">'+esc(r.nombre||'')+'</span></td><td>'+esc(r.lote||'—')+'</td><td class="n">'+fmt(r.cant||0)+'</td><td>'+esc((r.ts||'').slice(0,10))+'<br><span class="note">'+esc(r.prov||'')+'</span></td>'+
+    '<tr><td><span class="code">'+esc(r.ubi)+'</span></td><td>'+esc(r.sku)+'<br><span class="note">'+esc(r.nombre||'')+'</span></td><td>'+esc(r.lote||'—')+'</td><td class="n">'+fmt(r.cant||0)+'</td><td>'+esc((r.ts||'').slice(0,10))+'<br><span class="note">'+esc(r.prov||'')+(r.u&&r.u!=='local'&&r.u.length<40?' · '+esc(r.u):'')+'</span></td>'+
     '<td><button class="b" data-del="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Retirar</button></td></tr>').join('')||'<tr><td colspan="6" class="note">Sin stock registrado todavía.</td></tr>';
   const tot=Object.keys(INV).length, un=Object.keys(INV).reduce((s,u)=>s+(Number(INV[u].cant)||0),0);
   $('invTiles').innerHTML='<div class="tile"><b>'+fmt(tot)+'</b><small>pallets en bodega</small></div><div class="tile"><b>'+fmt(un)+'</b><small>unidades</small></div><div class="tile"><b>'+fmt(new Set(Object.keys(INV).map(u=>INV[u].sku)).size)+'</b><small>SKU distintos</small></div>';
@@ -1198,10 +1287,13 @@ function start(){
   $('btnRecargar').onclick=async()=>{
     setEstado('leyendo la planilla…','off');
     const r=await leerRemoto();
-    if(r&&r.inventario){INV=r.inventario;lsSet('metalpar_inv',INV);setEstado('planilla en la nube','on');}
+    if(sesionVencida(r)) return;
+    if(r&&r.inventario){INV=r.inventario;lsSet('metalpar_inv',INV);setEstado('planilla en la nube','on');mezclarOCRemotas(r);}
     else setEstado('sin conexión · datos locales','off');
     renderAll();
   };
+  $('loginForm').addEventListener('submit',ingresar);
+  $('btnSalir').onclick=()=>cerrarSesion();
   $('btnImp').onclick=()=>$('impFile').click();
   $('impFile').onchange=async e=>{
     const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
