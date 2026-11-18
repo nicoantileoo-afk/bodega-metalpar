@@ -71,6 +71,14 @@ button.b:focus-visible,select:focus-visible,input:focus-visible{outline:2px soli
 #viewport{position:relative;width:100%;aspect-ratio:4/3;max-width:100%;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
 #viewport canvas{display:block;width:100%;height:100%;touch-action:none}
 .vpctl{position:absolute;right:8px;top:8px;display:flex;gap:6px}
+.globo{position:absolute;z-index:6;pointer-events:none;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.18);padding:8px 10px;font-size:12.5px;line-height:1.35;max-width:260px;min-width:180px}
+.globo[hidden]{display:none}
+.globo b.cod{font-family:var(--mono);font-size:13px;color:var(--brand)}
+.globo .nom{font-weight:600;margin:2px 0 4px}
+.globo dl{display:grid;grid-template-columns:auto 1fr;gap:1px 8px;margin:0}
+.globo dt{color:var(--muted)} .globo dd{margin:0;font-variant-numeric:tabular-nums}
+.globo.libre{border-left-color:var(--line)}
+#mapMai{position:relative}
 .vpctl button{padding:5px 9px;font-size:12px;border-radius:5px}
 .vphint{position:absolute;left:8px;bottom:8px;font-size:11px;color:var(--muted);background:var(--panel);padding:3px 7px;border-radius:4px;opacity:.9}
 table{border-collapse:collapse;width:100%;font-size:13.5px}
@@ -239,7 +247,7 @@ nav button{flex:1 0 auto;padding:11px 9px}
   <div id="vpSlot2"></div>
   <div class="field" style="margin-top:12px"><label for="goto">Ir a una ubicación</label><input type="search" id="goto" placeholder="F08-03-0-A"></div>
   <div id="gotoInfo"></div>
-  <div id="mapMai" hidden style="margin-top:12px"></div>
+  <div id="mapMai" hidden style="margin-top:12px"></div><div class="globo" id="globo2d" hidden style="position:fixed"></div>
   <p class="note">Las cajas naranjas son posiciones con stock registrado en esta app. Los racks tienen 5 niveles (piso y vigas a 1,6 / 3,2 / 4,8 / 6,4 m) con 2 pallets por módulo. El color del piso de cada módulo es su zona de picking: rojo A1 (AX), salmón A2 (AY, AZ y nuevos), naranjo B y azul R (reserva). Los productos C van en las alturas libres. Despacho por la Puerta 2. En Maipú, la vista muestra la planta completa según el plano: las bodegas 2, 3 y 4 con tambores apilados a 4 alturas, la Bodega 5 con sus drive-in y el selectivo, y los racks exteriores.</p>
 </section>
 
@@ -362,7 +370,7 @@ nav button{flex:1 0 auto;padding:11px 9px}
 </div>
 
 <div id="vpHost" hidden>
-  <div id="viewport"><canvas id="c3d"></canvas><div class="vpctl"><button class="b" id="vGen">Vista general</button><button class="b" id="vFoc">Al pallet</button></div><span class="vphint">Arrastre para girar · dos dedos para acercar</span></div>
+  <div id="viewport"><canvas id="c3d"></canvas><div class="globo" id="globo3d" hidden></div><div class="vpctl"><button class="b" id="vGen">Vista general</button><button class="b" id="vFoc">Al pallet</button></div><span class="vphint">Arrastre para girar · dos dedos para acercar</span></div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -909,6 +917,7 @@ function init3D(){
   pin.rotation.x=Math.PI; pin.name='pin'; beacon.add(pin);
   beacon.visible=false; scene.add(beacon);
   orbit(cv);
+  globo3D(cv);
   overview();
   loop();
 }
@@ -923,6 +932,60 @@ function orbit(el){
   el.addEventListener('touchstart',e=>{if(e.touches.length===2){pinch=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);drag=null;}},{passive:true});
   el.addEventListener('touchmove',e=>{if(e.touches.length===2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);r=Math.max(6,Math.min(240,r*pinch/d));pinch=d;upd();}},{passive:true});
   el.style.touchAction='none';
+}
+// Globo con los datos del pallet bajo el mouse (o al tocarlo en el celular)
+function htmlGlobo(u){
+  const r=INV[u], p=POSBY[u]; if(!p) return '';
+  const g=describir(u)||{};
+  const q=u.split('-');
+  const lugar=p[8]==='MAI'?[g['Sector'],g['Módulo'],g['Nivel']].filter(Boolean).join(' · ')
+    :['Zona '+p[4],'fila '+q[0],'módulo '+Number(q[1]),q[2]==='0'?'piso':'nivel '+q[2],'lado '+q[3]].join(' · ');
+  if(!r) return '<b class="cod">'+esc(u)+'</b><div class="nom">Libre</div><div class="note">'+esc(lugar)+(p[6]?'<br>Plan: '+esc(p[6]):'')+'</div>';
+  const s=SKU[r.sku]||[];
+  const f=(k,v)=>(v===undefined||v===null||v==='')?'':'<dt>'+k+'</dt><dd>'+esc(v)+'</dd>';
+  const clase=(s[3]||'')+(s[10]?'·'+s[10]:'');
+  return '<b class="cod">'+esc(u)+'</b><div class="nom">'+esc(r.sku)+' · '+esc(r.nombre||s[0]||'')+'</div><dl>'+
+    f('Cantidad',r.cant!=null?fmt(Number(r.cant)||0)+(s[8]?' de '+fmt(s[8])+' u/pallet':''):'')+
+    f('Formato',[...new Set([s[1],s[2]].filter(Boolean))].join(' · '))+
+    f('Clase',clase)+f('Lote',r.lote)+f('Vence',r.fv)+f('Proveedor',r.prov)+f('OC',r.oc)+
+    f('Uso',r.uso)+f('Ingreso',(r.ts||'').slice(0,16).replace('T',' '))+f('Registró',r.usuario||r.nombreUsuario||r.u)+
+    f('Ubicación',lugar)+'</dl>';
+}
+function ponerGlobo(el,html,x,y,cont){
+  el.innerHTML=html; el.hidden=false; el.classList.toggle('libre',html.indexOf('>Libre<')>=0);
+  const W=cont?cont.clientWidth:innerWidth, H=cont?cont.clientHeight:innerHeight, w=el.offsetWidth, hh=el.offsetHeight;
+  let l=x+14, t=y+14; if(l+w>W-4) l=x-w-14; if(t+hh>H-4) t=y-hh-14;
+  el.style.left=Math.max(4,l)+'px'; el.style.top=Math.max(4,t)+'px';
+}
+function globo3D(cv){
+  const el=$('globo3d'), rc=new THREE.Raycaster(), v=new THREE.Vector2();
+  let pend=null, down=null, actual=null;
+  const pick=(cx,cy)=>{
+    const b=cv.getBoundingClientRect(); v.set((cx-b.left)/b.width*2-1,-(cy-b.top)/b.height*2+1);
+    rc.setFromCamera(v,camera);
+    const hit=rc.intersectObjects(occGroup.children,false)[0];
+    return hit&&hit.object.userData.ubis?hit.object.userData.ubis[hit.instanceId]:null;
+  };
+  const mostrar=(cx,cy)=>{
+    const u=pick(cx,cy), b=cv.getBoundingClientRect();
+    if(!u){el.hidden=true;actual=null;cv.style.cursor='';return;}
+    cv.style.cursor='pointer';
+    if(u!==actual||el.hidden){actual=u;}
+    ponerGlobo(el,htmlGlobo(u),cx-b.left,cy-b.top,$('viewport'));
+  };
+  cv.addEventListener('pointermove',e=>{
+    if(e.pointerType!=='mouse') return;
+    if(e.buttons){el.hidden=true;return;}
+    const cx=e.clientX,cy=e.clientY;
+    if(pend) cancelAnimationFrame(pend);
+    pend=requestAnimationFrame(()=>{pend=null;mostrar(cx,cy);});
+  });
+  cv.addEventListener('pointerleave',()=>{el.hidden=true;actual=null;});
+  cv.addEventListener('pointerdown',e=>{down={x:e.clientX,y:e.clientY};if(e.pointerType==='mouse')el.hidden=true;});
+  cv.addEventListener('pointerup',e=>{
+    if(!down) return; const quieto=Math.hypot(e.clientX-down.x,e.clientY-down.y)<6; down=null;
+    if(quieto) mostrar(e.clientX,e.clientY); else if(e.pointerType!=='mouse') el.hidden=true;
+  });
 }
 function overview(){
   if(ctrl){ if(BOD==='MAI'){const G=LAY.maipu3d;ctrl.set([0.0,0.62],new THREE.Vector3(G.L/2,0,G.W/2+2),128);} else ctrl.set([0.6,0.95],new THREE.Vector3(L/2,0,W/2),70); }
@@ -958,14 +1021,14 @@ function renderOcc(bodVista){
     pal.forEach((u,i)=>{const c=xyz3D(POSBY[u]);
       dummy.position.set(c.x,c.y+0.65,c.z);
       dummy.scale.set(1,1,1); dummy.updateMatrix(); im.setMatrixAt(i,dummy.matrix);});
-    im.instanceMatrix.needsUpdate=true; occGroup.add(im);
+    im.instanceMatrix.needsUpdate=true; im.userData.ubis=pal; occGroup.add(im);
   }
   if(mz.length){
     const im=new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,0.33,0.45),mat,mz.length);
     mz.forEach((u,i)=>{const p=POSBY[u];
       dummy.position.set(p[1]+0.17,p[3]+0.2,p[2]+0.07); dummy.scale.set(1,1,1);
       dummy.updateMatrix(); im.setMatrixAt(i,dummy.matrix);});
-    im.instanceMatrix.needsUpdate=true; occGroup.add(im);
+    im.instanceMatrix.needsUpdate=true; im.userData.ubis=mz; occGroup.add(im);
   }
 }
 function sizeVP(){
@@ -1443,7 +1506,7 @@ function renderMapMai(){
           const code=sc.s+'-'+String(m).padStart(2,'0')+'-'+n+'-'+sc.lados[i];
           const r=INV[code], p=POSBY[code];
           const fill=r?'#e8871a':(p&&p[6]?'#f3d9b8':'#e4e8e3');
-          svg+='<rect data-u="'+code+'" x="'+(x0+i*cel)+'" y="'+((sc.niv-1-n)*(cel+3))+'" width="'+(cel-2)+'" height="'+cel+'" rx="2" fill="'+fill+'" style="cursor:pointer"><title>'+code+(r?' · '+esc(r.sku):p&&p[6]?' · plan '+esc(p[6]):'')+'</title></rect>';
+          svg+='<rect data-u="'+code+'" x="'+(x0+i*cel)+'" y="'+((sc.niv-1-n)*(cel+3))+'" width="'+(cel-2)+'" height="'+cel+'" rx="2" fill="'+fill+'" style="cursor:pointer"></rect>';
         }
       }
     }
@@ -1935,6 +1998,12 @@ function start(){
   $('repoBox').addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-repo]');if(b){prepararTraslado(b.dataset.repo);$('trasBox').scrollIntoView({behavior:'smooth',block:'center'});}});
   document.querySelectorAll('#barBod [data-bod]').forEach(x=>x.onclick=()=>cambiarBodega(x.dataset.bod));
   cambiarBodega(BOD);
+  (function(){const g2=$('globo2d'),mm=$('mapMai');
+    mm.addEventListener('mouseover',e=>{const r=e.target.closest&&e.target.closest('[data-u]');if(!r){g2.hidden=true;return;}ponerGlobo(g2,htmlGlobo(r.dataset.u),e.clientX,e.clientY,null);});
+    mm.addEventListener('mousemove',e=>{if(!g2.hidden){const r=e.target.closest&&e.target.closest('[data-u]');if(r)ponerGlobo(g2,g2.innerHTML,e.clientX,e.clientY,null);}});
+    mm.addEventListener('mouseleave',()=>{g2.hidden=true;});
+    addEventListener('scroll',()=>{g2.hidden=true;},{passive:true});
+  })();
   $('mapMai').addEventListener('click',e=>{const r=e.target.closest&&e.target.closest('[data-u]');if(r){$('goto').value=r.dataset.u;gotoUbi(r.dataset.u);$('gotoInfo').scrollIntoView({behavior:'smooth',block:'nearest'});}});
   // agenda
   $('ageDia').value=hoy();
