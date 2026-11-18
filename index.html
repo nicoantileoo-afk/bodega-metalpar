@@ -180,10 +180,11 @@ nav button{flex:1 0 auto;padding:11px 9px}
     <div id="ocList"></div>
     <div class="btns">
       <button class="b" id="btnOcImp">Importar OC (Excel o CSV)</button>
-      <button class="b" id="btnOcDemo">Cargar OC de ejemplo</button>
+      <button class="b" id="btnOcBorrar">Borrar OC</button>
       <button class="b" id="btnSinOc">Recibir sin OC</button>
     </div>
     <input type="file" accept=".csv,.xlsx,.xls,text/csv" id="ocFile" hidden>
+    <div id="ocBorrarBox"></div>
     <p class="note" id="ocNote" style="margin-top:10px"></p>
   </div>
 
@@ -448,7 +449,7 @@ function puede(p){
 }
 function aplicarPermisos(){
   $('cargaCard').hidden=!puede('cargar');
-  ['btnOcImp','btnOcDemo','btnSinOc'].forEach(id=>{$(id).hidden=!puede('recibir');});
+  ['btnOcImp','btnSinOc'].forEach(id=>{$(id).hidden=!puede('recibir');}); $('btnOcBorrar').hidden=!puede('quitarOC');
   $('navUsr').hidden=!SYNC_URL||!puede('usuarios');
   if($('navUsr').hidden&&$('t-usr').classList.contains('on')) tab('rec');
   renderInv(); renderOcTodo();
@@ -505,7 +506,7 @@ function mezclarOCRemotas(r){
   if(!r||!r.oc||typeof r.oc!=='object') return;
   const locales=lsGet('metalpar_oc',{}), rem=r.oc;
   Object.keys(locales).forEach(k=>{ if(!rem[k]){ rem[k]=locales[k]; sync('oc',{oc:locales[k]}); } });
-  OCS=rem; lsSet('metalpar_oc',OCS); renderOcTodo();
+  OCS=rem; lsSet('metalpar_oc',OCS); limpiarEjemplos(); renderOcTodo();
 }
 function mezclarRemoto(r){
   if(!r) return;
@@ -1072,6 +1073,34 @@ async function guardarOC(o,delta){
   if(SYNC_URL){ await sync(delta?'oc-ubicar':'oc',delta||{oc:o}); return; }
   if(db&&!localMode&&!SYNC_URL){try{await db.collection('oc').doc(o.oc).set(o);}catch(e){msg('rec','La OC quedó guardada en este dispositivo, pero no se pudo subir a la nube.','warn');}}
 }
+// Las OC de ejemplo de versiones anteriores se eliminan solas.
+const OC_EJEMPLO=['4500018231','4500018238','4500018245','4500018252','4500018259'];
+function limpiarEjemplos(){
+  const ej=Object.keys(OCS).filter(k=>OCS[k]&&(OCS[k].origen==='ejemplo'||OC_EJEMPLO.indexOf(k)>=0));
+  if(!ej.length) return;
+  if(SES&&puede('quitarOC')) ej.forEach(k=>borrarOC(k));
+  else { const c=Object.assign({},OCS); ej.forEach(k=>delete c[k]); OCS=c; }
+}
+function panelBorrarOC(){
+  const box=$('ocBorrarBox');
+  if(box.innerHTML){box.innerHTML='';return;}
+  const l=Object.keys(OCS).map(k=>OCS[k]).sort((a,b)=>a.oc.localeCompare(b.oc));
+  if(!l.length){box.innerHTML='<div class="msg warn">No hay OC cargadas.</div>';return;}
+  box.innerHTML='<div class="card" style="margin:10px 0"><b>Borrar orden de compra</b>'+
+    '<div class="field" style="margin-top:8px"><label for="ocBorrarSel">OC</label><select id="ocBorrarSel">'+
+    l.map(o=>{const ub=o.lineas.reduce((s,x)=>s+(Number(x.ubic)||0),0);return '<option value="'+esc(o.oc)+'">OC '+esc(o.oc)+' · '+esc(o.prov||'')+' · '+(ESTADO_OC[o.estado]||[o.estado])[0]+(ub?' · '+fmt(ub)+' ubicadas':'')+'</option>';}).join('')+
+    '</select></div><p class="note" id="ocBorrarNota"></p>'+
+    '<div class="btns"><button class="b" id="ocBorrarOk">Borrar</button><button class="b" id="ocBorrarNo">Cancelar</button></div></div>';
+  const nota=()=>{const o=OCS[$('ocBorrarSel').value];const ub=o?o.lineas.reduce((s,x)=>s+(Number(x.ubic)||0),0):0;
+    $('ocBorrarNota').textContent=ub?('Esta OC ya tiene '+fmt(ub)+' unidades ubicadas. Los pallets se quedan en el inventario; solo se borra la orden.'):'Se borra la orden y su avance de recepción. No se puede deshacer.';};
+  $('ocBorrarSel').onchange=nota; nota();
+  $('ocBorrarNo').onclick=()=>{box.innerHTML='';};
+  confirmar2($('ocBorrarOk'),'Confirmar: borrar la OC',async()=>{
+    const n=$('ocBorrarSel').value; await borrarOC(n);
+    await logMov({tipo:'oc borrada',ubicacion:'—',sku:'OC '+n,cant:0,lote:'',prov:''});
+    box.innerHTML=''; if(ocAct===n){ocAct=null;vista('buscar');} renderOcList(); msg('rec','OC '+n+' borrada.','ok');
+  });
+}
 async function borrarOC(n){
   const c=Object.assign({},OCS); delete c[n]; OCS=c; lsSet('metalpar_oc',OCS);
   if(SYNC_URL){ await sync('oc-borrar',{oc:n}); return; }
@@ -1090,7 +1119,7 @@ function renderOcList(){
     return '<button class="ocitem'+(cerrada(o)?' cerr':'')+'" data-oc="'+esc(o.oc)+'"><div class="t"><span class="ocnum">OC '+esc(o.oc)+'</span>'+pillOC(o)+'</div>'+
       (function(){const c=citaDeOC(o.oc);return c?'<div class="note" style="margin-top:3px;color:var(--accent)">Camión '+esc(c.fecha===hoy()?'hoy':c.fecha)+' '+esc(c.hora)+' · '+esc(c.anden)+(c.estado==='en anden'?' · en andén':'')+'</div>':'';})()+
       '<div class="note" style="margin-top:3px">'+esc(o.prov)+' · entrega '+esc(o.fecha||'sin fecha')+' · '+o.lineas.length+' línea'+(o.lineas.length===1?'':'s')+' · '+fmt(ped)+' un.'+(ub?(' · '+fmt(ub)+' ubicadas'):'')+'</div></button>';
-  }).join('')||'<p class="note">'+(todas.length?'Ninguna OC coincide con la búsqueda.':'Todavía no hay órdenes de compra cargadas. Importe la exportación de SAP (ME2N) o cargue las OC de ejemplo.')+'</p>';
+  }).join('')||'<p class="note">'+(todas.length?'Ninguna OC coincide con la búsqueda.':'Todavía no hay órdenes de compra cargadas. Importe la exportación de SAP (ME2N) o espere el correo diario.')+'</p>';
   const ab=todas.filter(o=>!cerrada(o)).length;
   $('ocNote').textContent=todas.length?(fmt(ab)+' OC pendientes de recibir · '+fmt(todas.length-ab)+' cerradas'+(SYNC_URL?' · use Recargar para ver lo que registraron otros':'')):'';
 }
@@ -1116,7 +1145,7 @@ function renderOC(){
         '<td class="n"><input type="number" min="0" step="1" data-ll="'+i+'" value="'+(l.lleg==null?'':l.lleg)+'" inputmode="numeric"></td></tr>').join('')+
       '</tbody></table></div>'+
       '<div class="btns"><button class="b" id="ocTodo">Llegó todo completo</button><button class="b pri" id="ocVerif">Confirmar verificación</button></div>'+
-      ((tot('ubic')||!puede('quitarOC'))?'':'<div class="btns"><button class="b" id="ocQuitar">Quitar esta OC</button></div>');
+      (puede('quitarOC')?'<div class="btns"><button class="b" id="ocQuitar">Borrar esta OC</button></div>':'');
     $('ocDet').innerHTML=h; return;
   }
   const lin=o.lineas.map((l,i)=>{
@@ -1278,26 +1307,6 @@ async function importarOC(file){
     await guardarOC(o);
   }
   msg('rec','Importación lista: '+nuevas+' OC nuevas'+(act?', '+act+' actualizadas':'')+(omit?', '+omit+' omitidas porque ya están en recepción':'')+'.'+(fuera?(' '+fuera+' líneas traen un SKU que no está en el maestro de Metalpar.'):''),fuera||omit?'warn':'ok');
-  renderOcList();
-}
-function ocDemo(){
-  let seed=7; const rnd=()=>{seed=(seed*16807)%2147483647;return seed/2147483647;};
-  const enPlan=new Set(POS.filter(p=>p[6]).map(p=>p[6]));
-  const provs=Object.keys(PROV).filter(p=>PROV[p].some(c=>SKU[c]&&SKU[c][8]>0&&enPlan.has(c)));
-  const base=new Date(); let n=0;
-  for(let k=0;k<5;k++){
-    const pv=provs[k%provs.length];
-    const cand=PROV[pv].filter(c=>SKU[c]&&SKU[c][8]>0&&enPlan.has(c));
-    const usados=new Set(), lineas=[];
-    const nl=Math.min(cand.length,3+Math.floor(rnd()*4));
-    while(lineas.length<nl){const c=cand[Math.floor(rnd()*cand.length)];if(usados.has(c))continue;usados.add(c);
-      lineas.push({pos:String((lineas.length+1)*10),sku:c,desc:SKU[c][0],ped:SKU[c][8]*(1+Math.floor(rnd()*3)),lleg:null,ubic:0,ubis:[]});}
-    const f=new Date(base.getTime()+Math.floor(k/2)*86400000);
-    const oc=String(4500018231+k*7);
-    if(OCS[oc]) continue;
-    guardarOC({oc:oc,prov:pv,fecha:f.toISOString().slice(0,10),estado:'abierta',verif:false,lineas:lineas,origen:'ejemplo'}); n++;
-  }
-  msg('rec',n?('Se cargaron '+n+' OC de ejemplo con SKU y proveedores del maestro.'):'Las OC de ejemplo ya estaban cargadas.','ok');
   renderOcList();
 }
 function confirmar2(btn,texto,accion){
@@ -1524,7 +1533,7 @@ function renderInv(){
     .sort((a,b)=>(b.ts||'').localeCompare(a.ts||''));
   $('invBody').innerHTML=rows.slice(0,300).map(r=>
     '<tr><td><span class="code">'+esc(r.ubi)+'</span><br><span class="note">'+(POSBY[r.ubi]?NOMBRE_BOD[bodDe(r.ubi)]:'layout anterior')+'</span></td><td>'+esc(r.sku)+'<br><span class="note">'+esc(r.nombre||'')+'</span></td><td>'+esc(r.lote||'—')+'</td><td class="n">'+fmt(r.cant||0)+'</td><td>'+esc((r.ts||'').slice(0,10))+'<br><span class="note">'+esc(r.prov||'')+(r.u&&r.u!=='local'&&r.u.length<40?' · '+esc(r.u):'')+'</span></td>'+
-    '<td style="white-space:nowrap"><button class="b" data-et="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Etiqueta</button> '+(puede('recibir')&&POSBY[r.ubi]?'<button class="b" data-tr="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Trasladar</button> ':'')+(puede('retirar')?'<button class="b" data-del="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Retirar</button>':'')+'</td></tr>').join('')||'<tr><td colspan="6" class="note">Sin stock registrado todavía.</td></tr>';
+    '<td style="white-space:nowrap"><button class="b" data-et="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Etiqueta</button> '+(puede('recibir')&&POSBY[r.ubi]?'<button class="b" data-mv="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Cambiar ubicación</button> '+'<button class="b" data-tr="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Trasladar</button> ':'')+(puede('retirar')?'<button class="b" data-del="'+esc(r.ubi)+'" style="padding:5px 9px;font-size:13px">Retirar</button>':'')+'</td></tr>').join('')||'<tr><td colspan="6" class="note">Sin stock registrado todavía.</td></tr>';
   const enBod=Object.keys(INV).filter(u=>!POSBY[u]||bodDe(u)===BOD);
   const tot=enBod.length, un=enBod.reduce((s,u)=>s+(Number(INV[u].cant)||0),0);
   $('invTiles').innerHTML='<div class="tile"><b>'+fmt(tot)+'</b><small>pallets en bodega</small></div><div class="tile"><b>'+fmt(un)+'</b><small>unidades</small></div><div class="tile"><b>'+fmt(new Set(Object.keys(INV).map(u=>INV[u].sku)).size)+'</b><small>SKU distintos</small></div>';
@@ -1539,6 +1548,48 @@ function csv(rows){return rows.map(r=>r.map(c=>{c=String(c==null?'':c);return /[
 async function bajar(nombre,texto){
   if(downloads&&downloads.save){try{await downloads.save({filename:nombre,data:texto});return;}catch(e){}}
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([texto],{type:'text/plain'}));a.download=nombre;a.click();
+}
+
+// ---------- cambiar ubicación de un pallet (misma bodega u otra) ----------
+let MOV=null;
+function abrirMover(desde,boxId){
+  const r=INV[desde], box=$(boxId); if(!r||!box) return;
+  const sug=proponer(r.sku,[desde],bodDe(desde));
+  MOV={desde:desde,box:boxId};
+  box.innerHTML='<div class="card" style="margin:10px 0"><b>Cambiar ubicación</b> · '+esc(r.sku)+' · '+fmt(r.cant||0)+' un. · lote '+esc(r.lote||'—')+
+    '<dl class="kv" style="margin-top:6px"><dt>Ubicación actual</dt><dd><span class="code">'+esc(desde)+'</span> · '+NOMBRE_BOD[bodDe(desde)]+'</dd></dl>'+
+    '<div class="field"><label for="mvHacia">Nueva ubicación</label><input type="search" id="mvHacia" placeholder="F08-03-0-A o M5C-04-1-B" value="'+(sug?esc(sug.pos[0]):'')+'" autocomplete="off"></div>'+
+    '<p class="note" id="mvNota"></p>'+
+    '<div class="btns"><button class="b pri" id="mvOk">Confirmar cambio</button><button class="b" id="mvSug">Sugerir otra libre</button><button class="b" id="mvVer">Ver en el mapa</button><button class="b" id="mvNo">Cancelar</button></div></div>';
+  const rech=[desde];
+  const val=()=>{const u=($('mvHacia').value||'').trim().toUpperCase(), n=$('mvNota');
+    if(!u){n.textContent='Escriba el código de la ubicación de destino.';return null;}
+    if(!POSBY[u]){n.textContent='Esa ubicación no existe en el layout.';return null;}
+    if(u===desde){n.textContent='Es la misma ubicación actual.';return null;}
+    if(INV[u]){n.textContent='Ocupada por '+INV[u].sku+'. Elija una libre.';return null;}
+    if(bodDe(u)==='MAI'&&SKU[r.sku]&&SKU[r.sku][3]==='C'){n.textContent=r.sku+' es clase C: se guarda solo en Metalpar.';return null;}
+    const p=POSBY[u], g=describir(u)||{};
+    n.textContent='Libre · '+NOMBRE_BOD[bodDe(u)]+' · '+[g['Sector']||('Zona '+p[4]),g['Nivel']].filter(Boolean).join(' · ')+(p[6]&&p[6]!==r.sku?' · en el plan está asignada a '+p[6]:'');
+    return u;};
+  $('mvHacia').oninput=val; val();
+  $('mvSug').onclick=()=>{const v=($('mvHacia').value||'').trim().toUpperCase(); if(v&&rech.indexOf(v)<0) rech.push(v);
+    const s=proponer(r.sku,rech,bodDe(desde)); if(s){$('mvHacia').value=s.pos[0];val();} else $('mvNota').textContent='No quedan posiciones libres sugeridas en '+NOMBRE_BOD[bodDe(desde)]+'.';};
+  $('mvVer').onclick=()=>{const u=val(); tab('map'); $('goto').value=u||desde; gotoUbi(u||desde);};
+  $('mvNo').onclick=()=>{box.innerHTML='';MOV=null;};
+  $('mvOk').onclick=async()=>{const u=val(); if(!u) return; $('mvOk').disabled=true; await moverPallet(desde,u); };
+}
+async function moverPallet(desde,hacia){
+  const r0=INV[desde], box=MOV?$(MOV.box):$('trasBox');
+  if(!r0||INV[hacia]){box.innerHTML='<div class="msg bad">El inventario cambió. Vuelva a intentarlo.</div>';MOV=null;return;}
+  const uso=POSBY[hacia][8]==='MAI'?'Reserva Maipú':(POSBY[hacia][7]==='P'?'Picking':'Reserva');
+  const reg=Object.assign({},r0,{ts:new Date().toISOString(),u:uid,uso:uso,desde:desde});
+  const n=Object.assign({},INV); delete n[desde]; n[hacia]=reg; INV=n; lsSet('metalpar_inv',INV);
+  if(SYNC_URL) await sync('traslado',{desde:desde,ubicacion:hacia,reg:reg});
+  else if(!localMode){try{await db.collection('inventario').doc(desde).delete();await db.collection('inventario').doc(hacia).set(reg);}catch(e){}}
+  await logMov({tipo:'cambio de ubicación',ubicacion:desde+' → '+hacia,sku:reg.sku,cant:reg.cant,lote:reg.lote,prov:reg.prov});
+  ULT=Object.assign({ubi:hacia},reg); renderUlt(); if(autoImprimir()) imprimirEtiquetas([ULT]);
+  box.innerHTML='<div class="msg ok">Pallet movido: '+esc(reg.sku)+' de '+esc(desde)+' a '+esc(hacia)+'. Imprima la etiqueta nueva y péguela sobre la anterior.</div>';
+  MOV=null; renderAll();
 }
 
 // ---------- traslados entre bodegas ----------
@@ -1905,7 +1956,9 @@ function gotoUbi(u){
   $('gotoInfo').innerHTML='<div class="card"><div class="bigcode" style="font-size:22px">'+esc(u)+'</div><dl class="kv">'+
     Object.keys(g).map(k=>'<dt>'+esc(k)+'</dt><dd>'+esc(g[k])+'</dd>').join('')+
     '<dt>Estado</dt><dd>'+(inv?('ocupada por '+esc(inv.sku)+' · lote '+esc(inv.lote||'—')):'libre')+'</dd>'+
-    '<dt>Plan</dt><dd>'+(p[6]?('asignada a '+esc(p[6])+' ('+(p[7]==='P'?'picking':'reserva')+')'):'sin asignación en el plan')+'</dd></dl></div>';
+    '<dt>Plan</dt><dd>'+(p[6]?('asignada a '+esc(p[6])+' ('+(p[7]==='P'?'picking':'reserva')+')'):'sin asignación en el plan')+'</dd></dl>'+
+    (inv&&puede('recibir')?'<div class="btns"><button class="b" id="gotoMover">Cambiar ubicación</button></div>':'')+'</div><div id="gotoMvBox"></div>';
+  if(inv&&$('gotoMover')) $('gotoMover').onclick=()=>abrirMover(u,'gotoMvBox');
 }
 
 // ---------- wire up ----------
@@ -1937,7 +1990,7 @@ function start(){
   $('ocList').addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-oc]');if(b)abrirOC(b.dataset.oc);});
   $('btnOcImp').onclick=()=>$('ocFile').click();
   $('ocFile').onchange=async e=>{const f=e.target.files&&e.target.files[0];e.target.value='';if(f)await importarOC(f);};
-  $('btnOcDemo').onclick=ocDemo;
+  $('btnOcBorrar').onclick=()=>panelBorrarOC();
   $('btnSinOc').onclick=()=>{msg('rec','');vista('libre');paso(1);};
   $('btnVolverOc').onclick=()=>{liveStop();msg('rec','');vista('buscar');};
   $('ocDet').addEventListener('click',e=>{
@@ -1992,7 +2045,8 @@ function start(){
   $('invBody').addEventListener('click',e=>{const t=e.target; if(!t||!t.getAttribute) return;
     const u=t.getAttribute('data-del'); if(u){quitar(u);return;}
     const et=t.getAttribute('data-et'); if(et&&INV[et]) imprimirEtiquetas([Object.assign({ubi:et},INV[et])]);
-    const tr=t.getAttribute('data-tr'); if(tr&&INV[tr]) prepararTraslado(tr);});
+    const tr=t.getAttribute('data-tr'); if(tr&&INV[tr]) prepararTraslado(tr);
+    const mv=t.getAttribute('data-mv'); if(mv&&INV[mv]){abrirMover(mv,'trasBox');$('trasBox').scrollIntoView({behavior:'smooth',block:'center'});}});
   $('trasBox').addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-tacc]');if(!b)return;
     if(b.dataset.tacc==='ok') ejecutarTraslado(); else if(b.dataset.tacc==='otra') prepararTraslado(TRAS.desde,true); else {TRAS=null;$('trasBox').innerHTML='';}});
   $('repoBox').addEventListener('click',e=>{const b=e.target.closest&&e.target.closest('[data-repo]');if(b){prepararTraslado(b.dataset.repo);$('trasBox').scrollIntoView({behavior:'smooth',block:'center'});}});
@@ -2028,7 +2082,7 @@ function start(){
   window.addEventListener('resize',sizeVP);
   new ResizeObserver(sizeVP).observe($('viewport'));
   paso(1);
-  OCS=lsGet('metalpar_oc',{});
+  OCS=lsGet('metalpar_oc',{}); limpiarEjemplos(); lsSet('metalpar_oc',OCS);
   CITAS=lsGet('metalpar_citas',{});
   vista('buscar');
   if(!SYNC_URL) aplicarPermisos();
