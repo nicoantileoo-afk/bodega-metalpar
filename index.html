@@ -180,6 +180,7 @@ nav button{flex:1 0 auto;padding:11px 9px}
     <div id="ocList"></div>
     <div class="btns">
       <button class="b" id="btnOcImp">Importar OC (Excel o CSV)</button>
+      <button class="b" id="btnOcMail">Revisar correo ahora</button>
       <button class="b" id="btnOcBorrar">Borrar OC</button>
       <button class="b" id="btnSinOc">Recibir sin OC</button>
     </div>
@@ -449,7 +450,7 @@ function puede(p){
 }
 function aplicarPermisos(){
   $('cargaCard').hidden=!puede('cargar');
-  ['btnOcImp','btnSinOc'].forEach(id=>{$(id).hidden=!puede('recibir');}); $('btnOcBorrar').hidden=!puede('quitarOC');
+  ['btnOcImp','btnSinOc'].forEach(id=>{$(id).hidden=!puede('recibir');}); $('btnOcBorrar').hidden=!puede('quitarOC'); $('btnOcMail').hidden=!(SYNC_URL&&puede('recibir'));
   $('navUsr').hidden=!SYNC_URL||!puede('usuarios');
   if($('navUsr').hidden&&$('t-usr').classList.contains('on')) tab('rec');
   renderInv(); renderOcTodo();
@@ -514,7 +515,7 @@ function mezclarRemoto(r){
   if(Array.isArray(r.movs)) MOVS=r.movs;
 }
 function leerRemoto(){ return jsonp({token:SES?SES.token:''}); }
-function jsonp(params){
+function jsonp(params,espera){
   return new Promise(function(res){
     var cb='_inv'+Math.random().toString(36).slice(2), sc=document.createElement('script'), listo=false;
     function fin(v){ if(listo)return; listo=true; try{delete window[cb]}catch(e){window[cb]=undefined}
@@ -524,7 +525,7 @@ function jsonp(params){
     const q=Object.keys(params||{}).map(k=>encodeURIComponent(k)+'='+encodeURIComponent(params[k])).join('&');
     sc.src=SYNC_URL+(SYNC_URL.indexOf('?')>=0?'&':'?')+(q?q+'&':'')+'callback='+cb+'&t='+Date.now();
     document.head.appendChild(sc);
-    setTimeout(function(){fin(null)},20000);
+    setTimeout(function(){fin(null)},espera||20000);
   });
 }
 // Escritura: la respuesta no se puede leer desde otro dominio, pero la
@@ -1991,6 +1992,23 @@ function start(){
   $('btnOcImp').onclick=()=>$('ocFile').click();
   $('ocFile').onchange=async e=>{const f=e.target.files&&e.target.files[0];e.target.value='';if(f)await importarOC(f);};
   $('btnOcBorrar').onclick=()=>panelBorrarOC();
+  $('btnOcMail').onclick=async()=>{
+    const b=$('btnOcMail'); if(b.disabled) return; b.disabled=true; b.textContent='Revisando el correo…';
+    msg('rec','Buscando correos ME2N nuevos en location-oc@location-pro.cl. Puede tardar hasta un minuto.','ok');
+    const r=await jsonp({accion:'importar',token:SES&&SES.token},120000);
+    b.disabled=false; b.textContent='Revisar correo ahora';
+    if(sesionVencida(r)) return;
+    if(!r||!r.ok){msg('rec',r&&r.error==='permiso'?'Su usuario no tiene permiso para importar OC.':'No se pudo revisar el correo. Intente de nuevo en un momento.','bad');return;}
+    const s=r.resumen||{};
+    if(r.oc) mezclarOCRemotas({oc:r.oc});
+    if(s.ocupado){msg('rec','La revisión automática está corriendo en este momento. Las OC aparecerán solas en unos segundos.','warn');return;}
+    msg('rec',(s.correos?('Correo leído: '+(s.nuevas||0)+' OC nuevas, '+(s.actualizadas||0)+' actualizadas'+(s.omitidas?', '+s.omitidas+' ya en recepción (sin cambios)':'')+'.'):'No hay correos ME2N nuevos.')+((s.errores||[]).length?' Errores: '+s.errores.join(' | '):''),(s.errores||[]).length?'warn':'ok');
+  };
+  // con la lista de OC a la vista, trae las nuevas cada minuto (las que importó el correo)
+  setInterval(async()=>{
+    if(!SYNC_URL||!SES||document.hidden||VISTA!=='buscar'||!$('t-rec').classList.contains('on')) return;
+    const r=await jsonp({accion:'oc',token:SES.token}); if(r&&r.ok&&r.oc) mezclarOCRemotas(r);
+  },60000);
   $('btnSinOc').onclick=()=>{msg('rec','');vista('libre');paso(1);};
   $('btnVolverOc').onclick=()=>{liveStop();msg('rec','');vista('buscar');};
   $('ocDet').addEventListener('click',e=>{
